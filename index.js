@@ -11,7 +11,58 @@ app.use(express.json());
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const supabaseJwtSecret = process.env.SUPABASE_JWT_SECRET;
 const supabase = createClient(supabaseUrl, supabaseServiceKey);
+
+const jwt = require('jsonwebtoken');
+
+// --- MIDDLEWARE ---
+
+const authenticate = async (req, res, next) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'No token provided' });
+    }
+
+    const token = authHeader.split(' ')[1];
+    try {
+        const decoded = jwt.verify(token, supabaseJwtSecret);
+        req.user = decoded; // Contains sub (id), email, etc.
+        next();
+    } catch (err) {
+        return res.status(401).json({ error: 'Invalid token' });
+    }
+};
+
+const authorize = (role) => {
+    return async (req, res, next) => {
+        const email = req.user.email;
+        const userId = req.user.sub;
+
+        // Check if admin
+        const { data: admin, error: adminError } = await supabase
+            .from('admin_whitelist')
+            .select('email')
+            .eq('email', email)
+            .single();
+
+        const isAdmin = !!admin;
+
+        if (role === 'admin') {
+            if (isAdmin) return next();
+            return res.status(403).json({ error: 'Admin access required' });
+        }
+
+        if (role === 'user') {
+            // User must not be an admin and must have kpriet domain
+            const isUser = !isAdmin && email.endsWith('@kpriet.ac.in');
+            if (isUser) return next();
+            return res.status(403).json({ error: 'User access required (KPRIET domain)' });
+        }
+
+        next();
+    };
+};
 
 // --- HELPER FUNCTIONS ---
 
@@ -44,7 +95,7 @@ app.get('/api/health', (req, res) => {
     res.send('Server is running fine');
 });
 
-app.get('/api/timings/:year', async (req, res) => {
+app.get('/api/timings/:year', authenticate, async (req, res) => {
     try {
         const { data, error } = await supabase
             .from('year_period_timings')
@@ -59,8 +110,14 @@ app.get('/api/timings/:year', async (req, res) => {
     }
 });
 
-app.get('/api/user/:id', async (req, res) => {
+app.get('/api/user/:id', authenticate, async (req, res) => {
     try {
+        // Users can only view their own profile, admins can view any
+        if (req.user.sub !== req.params.id) {
+            const { data: admin } = await supabase.from('admin_whitelist').select('email').eq('email', req.user.email).single();
+            if (!admin) return res.status(403).json({ error: 'Unauthorized' });
+        }
+
         const { data, error } = await supabase
             .from('users')
             .select('*')
@@ -79,8 +136,13 @@ app.get('/api/user/:id', async (req, res) => {
     }
 });
 
-app.post('/api/user', async (req, res) => {
+app.post('/api/user', authenticate, async (req, res) => {
     try {
+        // Ensure user is updating their own profile
+        if (req.user.sub !== req.body.id) {
+            return res.status(403).json({ error: 'Cannot update other users' });
+        }
+
         const { data, error } = await supabase
             .from('users')
             .upsert(req.body)
@@ -98,9 +160,15 @@ app.post('/api/user', async (req, res) => {
     }
 });
 
-app.post('/api/od/request', async (req, res) => {
+app.post('/api/od/request', authenticate, authorize('user'), async (req, res) => {
     try {
         const { year, periods, date } = req.body;
+
+        // Security check: user_id in body must match authenticated user
+        if (req.body.user_id !== req.user.sub) {
+            return res.status(403).json({ error: 'User ID mismatch' });
+        }
+
         const validation = await validatePeriods(year, periods, date);
         if (!validation.valid) {
             return res.status(400).json({
@@ -121,8 +189,14 @@ app.post('/api/od/request', async (req, res) => {
     }
 });
 
-app.get('/api/od/history/:userId', async (req, res) => {
+app.get('/api/od/history/:userId', authenticate, async (req, res) => {
     try {
+        // User can only view their own history, admin can view all
+        if (req.user.sub !== req.params.userId) {
+            const { data: admin } = await supabase.from('admin_whitelist').select('email').eq('email', req.user.email).single();
+            if (!admin) return res.status(403).json({ error: 'Unauthorized' });
+        }
+
         const { data, error } = await supabase
             .from('od_requests')
             .select('*')
@@ -136,7 +210,7 @@ app.get('/api/od/history/:userId', async (req, res) => {
     }
 });
 
-app.get('/api/od/pending', async (req, res) => {
+app.get('/api/od/pending', authenticate, authorize('admin'), async (req, res) => {
     try {
         const { data, error } = await supabase
             .from('od_requests')
@@ -151,9 +225,15 @@ app.get('/api/od/pending', async (req, res) => {
     }
 });
 
-app.put('/api/od/review/:id', async (req, res) => {
+app.put('/api/od/review/:id', authenticate, authorize('admin'), async (req, res) => {
     try {
         const { status, remarks, reviewedBy } = req.body;
+
+        // Security: reviewer must be the authenticated admin
+        if (reviewedBy !== req.user.sub) {
+            return res.status(403).json({ error: 'Reviewer ID mismatch' });
+        }
+
         const { data, error } = await supabase
             .from('od_requests')
             .update({
@@ -173,7 +253,7 @@ app.put('/api/od/review/:id', async (req, res) => {
     }
 });
 
-app.get('/api/reports/summary', async (req, res) => {
+app.get('/api/reports/summary', authenticate, authorize('admin'), async (req, res) => {
     try {
         const { data, error } = await supabase
             .from('od_requests')
@@ -201,7 +281,7 @@ app.get('/api/reports/summary', async (req, res) => {
     }
 });
 
-app.get('/api/reports/export', async (req, res) => {
+app.get('/api/reports/export', authenticate, authorize('admin'), async (req, res) => {
     try {
         const { data, error } = await supabase
             .from('od_requests')
@@ -216,6 +296,48 @@ app.get('/api/reports/export', async (req, res) => {
         res.setHeader('Content-Type', 'text/csv');
         res.setHeader('Content-Disposition', 'attachment; filename=od_reports.csv');
         res.send(headers + rows);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// --- ADMIN MANAGEMENT ENDPOINTS ---
+
+app.get('/api/admin/whitelist', authenticate, authorize('admin'), async (req, res) => {
+    try {
+        const { data, error } = await supabase.from('admin_whitelist').select('*');
+        if (error) throw error;
+        res.json(data);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/admin/whitelist', authenticate, authorize('admin'), async (req, res) => {
+    try {
+        const { data, error } = await supabase.from('admin_whitelist').insert(req.body).select().single();
+        if (error) throw error;
+        res.status(201).json(data);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.delete('/api/admin/whitelist/:email', authenticate, authorize('admin'), async (req, res) => {
+    try {
+        const { error } = await supabase.from('admin_whitelist').delete().eq('email', req.params.email);
+        if (error) throw error;
+        res.status(204).send();
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/admin/timings', authenticate, authorize('admin'), async (req, res) => {
+    try {
+        const { data, error } = await supabase.from('year_period_timings').upsert(req.body).select();
+        if (error) throw error;
+        res.json(data);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
