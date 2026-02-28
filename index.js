@@ -39,21 +39,32 @@ const authorize = (role) => {
         const email = req.user.email;
         const userId = req.user.sub;
 
-        // Check if admin
-        const { data: admin, error: adminError } = await supabase
+        // Try to select with department first
+        let { data: admin, error: adminError } = await supabase
             .from('admin_whitelist')
             .select('email, department')
             .eq('email', email)
             .single();
 
+        // If it fails (e.g. 400 because department column doesn't exist), fallback to just email
+        if (adminError && adminError.code !== 'PGRST116') {
+            const result = await supabase
+                .from('admin_whitelist')
+                .select('email')
+                .eq('email', email)
+                .single();
+            admin = result.data;
+            adminError = result.error;
+        }
+
         const isAdmin = !!admin;
 
         if (role === 'admin') {
             if (isAdmin) {
-                req.user.department = admin.department; // Attach dept if exists
+                req.user.department = admin?.department; // Attach dept if exists
                 return next();
             }
-            console.error(`Auth Error: User ${email} is not in admin_whitelist`);
+            console.error(`Auth Error for ${email}:`, adminError);
             return res.status(403).json({ error: 'Admin access required' });
         }
 
