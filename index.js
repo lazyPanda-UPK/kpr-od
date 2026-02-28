@@ -41,7 +41,7 @@ const validatePeriods = async (year, periods, dateStr) => {
 // --- API ENDPOINTS ---
 
 app.get('/api/health', (req, res) => {
-    res.send('Server is running');
+    res.send('Server is running fine');
 });
 
 app.get('/api/timings/:year', async (req, res) => {
