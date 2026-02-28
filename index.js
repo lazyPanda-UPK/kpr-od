@@ -42,14 +42,18 @@ const authorize = (role) => {
         // Check if admin
         const { data: admin, error: adminError } = await supabase
             .from('admin_whitelist')
-            .select('email')
+            .select('email, department')
             .eq('email', email)
             .single();
 
         const isAdmin = !!admin;
 
         if (role === 'admin') {
-            if (isAdmin) return next();
+            if (isAdmin) {
+                req.user.department = admin.department; // Attach dept if exists
+                return next();
+            }
+            console.error(`Auth Error: User ${email} is not in admin_whitelist`);
             return res.status(403).json({ error: 'Admin access required' });
         }
 
@@ -212,15 +216,22 @@ app.get('/api/od/history/:userId', authenticate, async (req, res) => {
 
 app.get('/api/od/pending', authenticate, authorize('admin'), async (req, res) => {
     try {
-        const { data, error } = await supabase
+        let query = supabase
             .from('od_requests')
             .select('*, users!od_requests_user_id_fkey(name, email)')
-            .eq('status', 'pending')
-            .order('submitted_at', { ascending: true });
+            .eq('status', 'pending');
+
+        // Apply department filter if admin has one
+        if (req.user.department) {
+            query = query.eq('department', req.user.department);
+        }
+
+        const { data, error } = await query.order('submitted_at', { ascending: true });
 
         if (error) throw error;
         res.json(data);
     } catch (err) {
+        console.error("PENDING ERROR:", err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -255,9 +266,16 @@ app.put('/api/od/review/:id', authenticate, authorize('admin'), async (req, res)
 
 app.get('/api/reports/summary', authenticate, authorize('admin'), async (req, res) => {
     try {
-        const { data, error } = await supabase
+        let query = supabase
             .from('od_requests')
             .select('status, department, od_category');
+
+        // Apply department filter if admin has one
+        if (req.user.department) {
+            query = query.eq('department', req.user.department);
+        }
+
+        const { data, error } = await query;
 
         if (error) throw error;
 
@@ -277,6 +295,7 @@ app.get('/api/reports/summary', authenticate, authorize('admin'), async (req, re
 
         res.json(stats);
     } catch (err) {
+        console.error("SUMMARY ERROR:", err);
         res.status(500).json({ error: err.message });
     }
 });
