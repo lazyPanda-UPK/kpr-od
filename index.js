@@ -15,7 +15,7 @@ const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
 // --- HELPER FUNCTIONS ---
 
-const validatePeriods = async (year, periods) => {
+const validatePeriods = async (year, periods, dateStr) => {
     const { data: timings, error } = await supabase
         .from('year_period_timings')
         .select('*')
@@ -24,17 +24,17 @@ const validatePeriods = async (year, periods) => {
 
     if (error) throw error;
 
+    const requestDate = new Date(dateStr);
     const now = new Date();
-    const currentTime = now.getHours() * 60 + now.getMinutes();
 
-    for (const period of timings) {
-        const [hours, minutes] = period.start_time.split(':').map(Number);
-        const startTimeInMins = hours * 60 + minutes;
+    // Normalize both dates to midnight local time for comparison
+    const reqDateNormalized = new Date(requestDate.getFullYear(), requestDate.getMonth(), requestDate.getDate());
+    const nowDateNormalized = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
-        if (currentTime >= startTimeInMins) {
-            return { valid: false, period: period.period_number };
-        }
+    if (reqDateNormalized < nowDateNormalized) {
+        return { valid: false, errorMsg: 'Cannot apply for OD on past dates.' };
     }
+
     return { valid: true };
 };
 
@@ -100,11 +100,11 @@ app.post('/api/user', async (req, res) => {
 
 app.post('/api/od/request', async (req, res) => {
     try {
-        const { year, periods } = req.body;
-        const validation = await validatePeriods(year, periods);
+        const { year, periods, date } = req.body;
+        const validation = await validatePeriods(year, periods, date);
         if (!validation.valid) {
             return res.status(400).json({
-                error: `Period ${validation.period} has already started and cannot be selected.`
+                error: validation.errorMsg
             });
         }
 
