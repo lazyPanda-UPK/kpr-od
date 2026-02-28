@@ -140,7 +140,7 @@ app.get('/api/od/pending', async (req, res) => {
     try {
         const { data, error } = await supabase
             .from('od_requests')
-            .select('*, users(name, email)')
+            .select('*, users!od_requests_user_id_fkey(name, email)')
             .eq('status', 'pending')
             .order('submitted_at', { ascending: true });
 
